@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+.venv/
+venv/
+
+# Environment
+.env
+*.env.local
+
+# Frontend
+node_modules/
+frontend/build/
+frontend/dist/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Project data (uploaded files, indexes, temporary data)
+backend/data/
+backend/data/kb_import/archive/
+
+# Large model files (managed separately)
+Qwen3-VL-Embedding-2B/
+tesseract_ydx/
+tesseract-ocr-w64-setup-5.3.0.20221222.exe
+
+# MinerU temp results
+backend/data/_mineru_results/
+
+# Debug/temp scripts
+backend/debug_import.py
+backend/debug_simple.py
+backend/test_search.py
+test_importer.py
+
+# OS
+Thumbs.db
+.DS_Store
