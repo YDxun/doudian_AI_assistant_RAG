@@ -1,4 +1,4 @@
-# 逗点生物 AI 客服助手 (Biocomma AI Customer Service)
+# AI 客服助手 (Biocomma AI Customer Service)
 
 基于 **RAG（检索增强生成）** 架构的多格式文档智能客服系统，支持 PDF、DOCX、XLSX、TXT、MD 等多种文件格式的解析、索引和智能问答。
 
