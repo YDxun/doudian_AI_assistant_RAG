@@ -117,7 +117,7 @@ SYSTEM_INSTRUCTION = """# Role: 逗点生物食品分析专业分析AI客服 (Bi
  
 ## Critical Constraints (必须严格遵守)
 1. **知识边界**: 
-   - **仅**基于检索到相关的切片内容回答问题。
+   - **仅**基于提供的参考信息回答问题。
    - **严禁**编造货号、URL、技术参数或不存在的产品。
    - 若知识库中无相关信息，必须回复："我的资料库里没有相关信息"，并立即提供人工客服微信号：`13537517880`，"您可以添加人工客服微信，进行下一步咨询。"
 2. **链接安全**: 
@@ -164,18 +164,7 @@ SYSTEM_INSTRUCTION = """# Role: 逗点生物食品分析专业分析AI客服 (Bi
   "您好，我是逗点生物食品分析专业智能体，您的科研助手。我可以帮助您解答关于产品的技术问题、使用方法、适用范围以及推荐合适的产品。如果您有关于食品分析等产品的任何问题，欢迎随时提问。请问您需要了解什么产品？"
 - **英文回复模板**:
   "I am Biocomma's AI customer service assistant, specializing in food analysis solutions. I provide one-stop support, including product consultation, application guidance, and COA report downloads. Let me know your needs, and I'll respond promptly."
- 
-## Workflow
-1. **Input Analysis**: 接收用户输入，判断语种和意图。
-2. **Knowledge Retrieval**: 在知识库中检索相关信息。
-   - *分支A (有信息)*: 提取数据，应用业务规则（如GB标准匹配、GF优先策略）。
-   - *分支B (无信息)*: 执行"知识边界"约束中的默认回复流程。
-3. **Response Generation**:
-   - 构建核心回答。
-   - 根据意图附加固定模块（如COA链接、客服引导）。
-   - 应用"追问策略"生成结尾追问。
-4. **Final Check**: 检查是否包含Emoji、虚构链接或违规内容。
- 
+
 ## Follow-up Strategy (追问策略)
 *原则：针对性强、引导下一步行动、保持语种一致。*
 
@@ -186,40 +175,42 @@ SYSTEM_INSTRUCTION = """# Role: 逗点生物食品分析专业分析AI客服 (Bi
 | **农残/兽残具体化** | "你检测的具体种类（如有机磷、拟除虫菊酯、抗生素）是什么？确保产品完全适配。" | "What specific analytes are you targeting (e.g., organophosphates, pyrethroids, antibiotics)? This ensures the products are fully compatible." |
 | **COA查询** | "你需要查询哪个产品的COA报告？可以提供产品编号/货号。" | "Which product's COA do you need? Please provide the product code or catalog number." |
 | **非标/自定义应用** | "请问您主要的应用场景或检测项目是什么？" | "Could you please describe your main application scenario or target analytes?" |
- 
-## Output Example Structure
- 
-**Case 1: Product Recommendation**
+"""
 
-根据您的描述，推荐以下符合 GB 4789.2-2022 标准的平板计数琼脂培养基：
-
-1. 【产品名称】平板计数琼脂（PCA）
-   【货号】GF1001
-   【规格】250g/瓶
-   【逗点商城链接】https://www.commashop.cn/product/detail/7893 
-
-注意：干粉培养基使用后立即密封，避免吸潮结块。贮存于避光、干燥处。
-
-你需要检测项目是什么？（菌落总数、大肠菌群、大肠埃希氏菌、粪大肠菌群及其他肠道菌、霉菌及酵母、沙门氏菌、金黄色葡萄球菌），以便我推荐更适配的产品。
-
-**Case 2: No Information Found**
-
-我的资料库里没有相关信息
-
-人工客服微信号：13537517880
-
-您可以添加人工客服微信，方便进一步咨询。
-
-**Case 3: COA Request**
-
-您可以访问以下链接下载COA报告：
-https://coa.biocomma.cn/pqreport/ 
-
-你需要查询哪个产品的COA报告？可以提供产品编号/货号，我帮你快速定位。"""
+# Few-shot 示例：在历史消息中插入，比写在 system prompt 中更高效
+# 每个示例为 (user_question, assistant_answer) 对
+FEWSHOT_EXAMPLES = [
+    # Case 1: 产品推荐（有知识库上下文）
+    (
+        "我需要做菌落总数检测，符合GB 4789.2标准，推荐什么培养基？",
+        "根据您的需求，推荐以下符合 GB 4789.2-2022 标准的平板计数琼脂培养基：\n\n"
+        "1. 【产品名称】平板计数琼脂（PCA）\n"
+        "   【货号】GF1001\n"
+        "   【规格】250g/瓶\n"
+        "   【逗点商城链接】https://www.commashop.cn/product/detail/7893\n\n"
+        "注意：干粉培养基使用后立即密封，避免吸潮结块。贮存于避光、干燥处。\n\n"
+        "你需要检测什么项目？（菌落总数、大肠菌群、大肠埃希氏菌、粪大肠菌群及其他肠道菌、霉菌及酵母、沙门氏菌、金黄色葡萄球菌），"
+        "以便我推荐更适配的产品。"
+    ),
+    # Case 2: 知识库无相关信息
+    (
+        "请问你们公司有测重金属的试剂盒吗？",
+        "我的资料库里没有相关信息\n\n"
+        "人工客服微信号：13537517880\n\n"
+        "您可以添加人工客服微信，方便进一步咨询。"
+    ),
+    # Case 3: COA 报告查询
+    (
+        "我想下载COA报告",
+        "您可以访问以下链接下载COA报告：\n"
+        "https://coa.biocomma.cn/pqreport/\n\n"
+        "你需要查询哪个产品的COA报告？可以提供产品编号/货号，我帮你快速定位。"
+    ),
+]
 
 GRADE_PROMPT = (
     "你是一个判定器，评估检索到的上下文是否有助于回答用户问题。\n"
-    "上下文片段：\n{context}\n\n问题：{question}\n"
+    "上下文内容：\n{context}\n\n问题：{question}\n"
     "如果上下文对回答该问题有帮助，返回 'yes'；否则返回 'no'。"
 )
 
@@ -231,14 +222,12 @@ ANSWER_WITH_CONTEXT = (
     "作为一名助人为乐的助手，你需要仔细详细的感受用户的需求，并作出详细的回答。"
     "如果有图片，请在回答中给出图片的Markdown引用。\n\n"
     "【严格要求】\n"
-    "1. 上下文中以 \"--- 知识库片段 N ---\" 分隔的内容是检索到的参考资料，请直接引用其中信息作答。\n"
-    "2. 严禁在回复末尾或任何位置生成\"相关文档片段\"、\"参考资料\"、\"引用来源\"、\"参考片段\"等占位列表。\n"
-    "3. 严禁输出\"(无文本片段)\"或类似的空占位文字。\n"
-    "4. 如果上下文中已包含完整信息（如操作步骤1-7已全部列出），请全部引用，不要声称\"未列出\"或\"不完整\"。"
+    "1. 直接基于上文提供的信息作答，不要解释信息来源或引用机制。\n"
+    "2. 回答末尾只保留追问或结束语，不要附加任何列表、编号引用或元数据说明。"
 )
 
 ANSWER_NO_CONTEXT = (
-    "当前未找到与课程资料直接相关的片段，将基于通识知识作答。\n"
+    "当前未找到直接相关的信息，将基于通识知识作答。\n"
     "问题：\n{question}"
 )
 
@@ -360,7 +349,7 @@ async def retrieve(question: str, file_id: str) -> tuple[list[dict], str]:
             "score": float(score),
             "previewUrl": f"/api/v1/pdf/page?fileId={file_id}&page={(page or 1)}&type=original",
         })
-        ctx_snippets.append(f"[{i}] {snippet_short}")
+        ctx_snippets.append(snippet_short)
         scores.append(float(score))
     context_text = "\n\n".join(ctx_snippets) if ctx_snippets else "(no hits)"
 
@@ -397,7 +386,8 @@ async def answer_stream(
             yield {"type": "citation", "data": c}
 
     # 组装"历史 + 本轮提示"
-    llm = _get_llm()
+    # 添加 stop 序列：在 LLM 层面阻止生成"相关文档片段"
+    llm = _get_llm().bind(stop=["相关文档片段"])
     history_msgs = get_history(session_id) if session_id else []
 
     if branch == "with_context" and context_text:
@@ -405,8 +395,12 @@ async def answer_stream(
     else:
         user_prompt = ANSWER_NO_CONTEXT.format(question=question)
 
-    # 完整消息序列：system + 历史多轮 + 当前用户
+    # 完整消息序列：system + few-shot 示例 + 历史多轮 + 当前用户
     msgs = [{"role": "system", "content": SYSTEM_INSTRUCTION}]
+    # 注入 few-shot 示例，帮助模型理解输出格式
+    for user_q, assistant_a in FEWSHOT_EXAMPLES:
+        msgs.append({"role": "user", "content": user_q})
+        msgs.append({"role": "assistant", "content": assistant_a})
     # 将历史逐条附加（保持 role: "user"/"assistant"）
     msgs.extend(history_msgs)
     # 当前用户问题
@@ -414,14 +408,26 @@ async def answer_stream(
 
     # 把最终生成的文本拼接出来用于写历史
     final_text_parts: list[str] = []
-    # 滑动缓冲区：用于跨 delta 检测\"相关文档片段\"等占位文字
-    # LLM 流式输出可能把 \"相/关/文/档/片/段\" 拆到多个 token 里
-    _trailing_buffer = ""      # 保留最近输出的字符用于模式匹配
-    _TRAILING_MAX = 80         # 缓冲区最大长度
-    _REF_SECTION_RE = re.compile(
+    # 待发送缓冲区：先缓存 delta，确认不含禁止词后再发送
+    # 避免 LLM 流式输出把 \"相/关/文/档/片/段\" 拆到多个 token 时已发送部分无法撤回
+    _pending = ""               # 待发送的累积文本
+    _FORBIDDEN_RE = re.compile(
         r'相关文档片段|（无文本片段）|无文本片段',
         re.IGNORECASE
     )
+    # 禁止词的所有前缀（用于检测可能跨 token 的局部匹配）
+    _FORBIDDEN_PREFIXES = (
+        "相", "相关", "相关文", "相关文档", "相关文档片", "相关文档片段",
+        "（", "（无", "（无文", "（无文本", "（无文本片", "（无文本片段", "（无文本片段）",
+        "无", "无文", "无文本", "无文本片", "无文本片段",
+    )
+
+    def _ends_with_forbidden_prefix(s: str) -> bool:
+        """检测字符串末尾是否与禁止词前缀匹配（表示可能被拆到下一个 token）"""
+        for prefix in _FORBIDDEN_PREFIXES:
+            if len(prefix) <= len(s) and s.endswith(prefix):
+                return True
+        return False
 
     # 优先使用流式
     try:
@@ -430,41 +436,46 @@ async def answer_stream(
             if not delta:
                 continue
 
-            # 追加到滑动缓冲区
-            _trailing_buffer += delta
-            if len(_trailing_buffer) > _TRAILING_MAX:
-                _trailing_buffer = _trailing_buffer[-_TRAILING_MAX:]
+            _pending += delta
 
-            # 跨 delta 检测\"相关文档片段\"等占位文字
-            m = _REF_SECTION_RE.search(_trailing_buffer)
+            # 检查累积文本中是否出现禁止词
+            m = _FORBIDDEN_RE.search(_pending)
             if m:
-                # 找到了：截断到匹配位置之前
-                cut_pos = m.start()
-                # 计算这个 delta 中有多少字符是可以保留的
-                delta_len = len(delta)
-                overlap_in_delta = cut_pos - (len(_trailing_buffer) - delta_len)
-                if overlap_in_delta > 0:
-                    # 部分在当前 delta 中：只保留当前 delta 中干净的字符
-                    clean_part = delta[:overlap_in_delta]
-                    if clean_part:
-                        final_text_parts.append(clean_part)
-                        yield {"type": "token", "data": clean_part}
-                elif overlap_in_delta == 0:
-                    # 匹配位置正好在当前 delta 开始处：整个 delta 都是垃圾，也无需回退
-                    pass
-                else:
-                    # 匹配位置在更早的缓冲区中（理论上不应发生），不回退已发送数据
-                    pass
-                break  # 立即停止流式输出
+                # 命中：只发送匹配位置之前的干净部分
+                clean = _pending[:m.start()]
+                if clean:
+                    final_text_parts.append(clean)
+                    yield {"type": "token", "data": clean}
+                _pending = ""
+                break  # 停止流式输出
 
-            final_text_parts.append(delta)
-            yield {"type": "token", "data": delta}
+            # 未命中，但末尾可能是禁止词前缀 → 先不发，等下一个 delta
+            if _ends_with_forbidden_prefix(_pending):
+                continue
+
+            # 确认安全：发送累积文本并清空
+            final_text_parts.append(_pending)
+            yield {"type": "token", "data": _pending}
+            _pending = ""
+
+        # 循环正常结束：发送剩余缓冲区
+        if _pending:
+            # 最后再做一次检查
+            m = _FORBIDDEN_RE.search(_pending)
+            if m:
+                clean = _pending[:m.start()]
+                if clean:
+                    final_text_parts.append(clean)
+                    yield {"type": "token", "data": clean}
+            else:
+                final_text_parts.append(_pending)
+                yield {"type": "token", "data": _pending}
     except Exception:
         # 回退：非流式整段生成
         resp = await llm.ainvoke(msgs)
         text = resp.content or ""
         # 同样需要截断非流式输出中的占位文字
-        text = _REF_SECTION_RE.split(text)[0].rstrip()
+        text = _FORBIDDEN_RE.split(text)[0].rstrip()
         final_text_parts.append(text)
         for i in range(0, len(text), 20):
             yield {"type": "token", "data": text[i:i+20]}
@@ -521,7 +532,7 @@ async def retrieve_multi(question: str, file_ids: list[str]) -> tuple[list[dict]
                     "score": float(score),
                     "previewUrl": f"/api/v1/pdf/page?fileId={file_id}&page={(page or 1)}&type=original",
                 })
-                all_snippets.append(f"[{file_id}:{i}] {snippet_short}")
+                all_snippets.append(snippet_short)
                 best_scores.append(float(score))
         except FileNotFoundError:
             continue

@@ -103,7 +103,7 @@ def _filter_unified_search(search_result):
             "source_file": hit["metadata"].get("source_file"),
             "previewUrl": None
         })
-        ctx_snippets.append(f"--- 知识库片段 {i} ---\n{snippet_short}")
+        ctx_snippets.append(snippet_short)
 
     context_text = "\n\n".join(ctx_snippets)
     print(f"Unified KB: {len(hits)}/{len(search_result['results'])} passed threshold, "
@@ -267,6 +267,10 @@ async def chat_stream(req: ChatRequest):
 
             # 先推送引用（若有）
             if branch == "with_context" and citations:
+                # 将统一知识库的引用注入全局字典，供 /api/v1/pdf/chunk 端点查询
+                _global_citations = globals()["citations"]
+                for c in citations:
+                    _global_citations[c["citation_id"]] = c
                 for c in citations:
                     yield "event: citation\n"
                     yield f"data: {json.dumps(c, ensure_ascii=False)}\n\n"

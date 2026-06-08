@@ -22,6 +22,7 @@ frontend/dist/
 *.swo
 
 # Project data (uploaded files, indexes, temporary data)
+data/
 backend/data/
 backend/data/kb_import/archive/
 

@@ -4,8 +4,6 @@ import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize from "rehype-sanitize";
 import { defaultSchema } from "hast-util-sanitize"; // ⭐ 新增
-import { FileText, ExternalLink } from "lucide-react";
-import { getCitationChunk } from "../services/api";
 
 /** 可改成从 .env 读取 */
 const API_BASE = "http://localhost:8001/api/v1";
@@ -99,53 +97,6 @@ function Img(props: React.ImgHTMLAttributes<HTMLImageElement>) {
   );
 }
 
-/** 懒加载 citation 详情，仅展示 snippet + 查看原页 */
-function ReferenceCard({ citationId, index }: { citationId: string; index: number }) {
-  const [loading, setLoading] = useState(false);
-  const [snippet, setSnippet] = useState<string>("");
-  const [previewUrl, setPreviewUrl] = useState<string>("");
-
-  useEffect(() => {
-    let mounted = true;
-    (async () => {
-      try {
-        setLoading(true);
-        const chunk = await getCitationChunk(citationId);
-        if (!mounted) return;
-        setSnippet(chunk?.snippet || "");
-        setPreviewUrl(chunk?.previewUrl ? toAbsoluteApiUrl(chunk.previewUrl) : "");
-      } finally {
-        if (mounted) setLoading(false);
-      }
-    })();
-    return () => { mounted = false; };
-  }, [citationId]);
-
-  return (
-    <div className="bg-muted/20 rounded-lg p-3 border border-border/30">
-      <div className="flex items-start gap-3">
-        <span className="inline-flex items-center justify-center w-6 h-6 text-xs font-medium bg-primary/20 text-primary rounded-full shrink-0">
-          {index + 1}
-        </span>
-        <div className="flex-1 min-w-0">
-          <div className="text-sm text-foreground leading-relaxed whitespace-pre-wrap">
-            {loading ? "加载中…" : (snippet ? (snippet.length > 200 ? snippet.slice(0, 200) + "…" : snippet) : "（无文本片段）")}
-          </div>
-          {previewUrl && (
-            <button
-              className="mt-2 inline-flex items-center text-xs px-2 py-1 rounded bg-white/10 hover:bg-white/20"
-              onClick={() => window.open(previewUrl, "_blank")}
-            >
-              <ExternalLink className="w-3 h-3 mr-1" />
-              查看原页
-            </button>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
 export type Reference = {
   id: number;
   text?: string;
@@ -194,23 +145,7 @@ export function MarkdownRenderer({
         {sanitizedContent}
       </ReactMarkdown>
 
-      {/* 相关文档片段（只展示 snippet + 查看原页），不再渲整页大图 */}
-      {references?.length > 0 && (
-        <div className="mt-4 pt-4 border-t border-border/30">
-          <div className="flex items-center gap-2 mb-2">
-            <FileText className="w-4 h-4 text-primary" />
-            <span className="text-sm font-medium">相关文档片段</span>
-            <span className="text-xs text-muted-foreground">({references.length})</span>
-          </div>
-          <div className="space-y-2">
-            {references
-              .filter((r) => !!r.citationId)
-              .map((r, i) => (
-                <ReferenceCard key={r.citationId!} citationId={r.citationId!} index={i} />
-              ))}
-          </div>
-        </div>
-      )}
+
     </div>
   );
 }
