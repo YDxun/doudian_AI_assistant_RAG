@@ -1,43 +1,14 @@
 # services/rag_service.py
 from __future__ import annotations
-import os, asyncio, textwrap
-# Disable oneDNN / MKLDNN to avoid PIR attribute errors on Windows CPU
-os.environ["FLAGS_use_mkldnn"] = "0"
-os.environ["FLAGS_enable_pir_api"] = "0"
-os.environ["FLAGS_enable_pir_inference"] = "0"
-os.environ["FLAGS_enable_onednn_layouts"] = "0"
-from typing import List, Dict, Any, Tuple, AsyncGenerator
-from typing_extensions import TypedDict
+import os, asyncio
+from typing import Dict, Any, AsyncGenerator
 
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
-from langchain.chat_models import init_chat_model
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
 from collections import defaultdict
 from pathlib import Path
-
-# PaddleOCR for user-uploaded files
-try:
-    from paddleocr import PaddleOCR
-    HAS_PADDLEOCR = True
-except ImportError:
-    HAS_PADDLEOCR = False
-
-# Image support for OCR
-try:
-    from PIL import Image
-    HAS_PIL = True
-except ImportError:
-    HAS_PIL = False
-
-# PDF support for OCR
-try:
-    import fitz
-    HAS_PDF = True
-except ImportError:
-    HAS_PDF = False
+import re
 
 # 存储结构：sessions[session_id] = [{"role":"user|assistant","content":"..."}...]
 _sessions: dict[str, list[dict]] = defaultdict(list)
@@ -57,36 +28,39 @@ MODEL_PROVIDER = "deepseek"
 TEMPERATURE = 0
 
 EMBED_MODEL_PATH = r"d:\ydx\workplace06\MRAG\Qwen3-VL-Embedding-2B"
-K = 3
-# FAISS L2：越小越相似；数值可以灵活调整
-SCORE_TAU_TOP1 = 0.45
-SCORE_TAU_MEAN3 = 0.60
 
 # ---------------- 自定义 Qwen3VL Embedding（兼容 langchain 接口） ----------------
-import sys as _sys
-_embed_script_dir = os.path.join(EMBED_MODEL_PATH, "scripts")
-if _embed_script_dir not in _sys.path:
-    _sys.path.insert(0, _embed_script_dir)
+_qwen3vl_embedder = None
 
-from qwen3_vl_embedding import Qwen3VLEmbedder as _Qwen3VLEmbedder
-from langchain_core.embeddings import Embeddings as _LangchainEmbeddings
 
-_qwen3vl_embedder: Optional[_Qwen3VLEmbedder] = None
-
-class Qwen3VLEmbeddings(_LangchainEmbeddings):
+class Qwen3VLEmbeddings:
     """使用 Qwen3-VL-Embedding-2B 的 last-token-pooling 文本向量化，兼容 langchain 接口。
 
     该模型是 VL 多模态模型，HuggingFaceEmbeddings 无法直接加载。
+    所有 heavy 依赖（PyTorch、模型代码）均为延迟导入，避免阻塞服务启动。
     """
 
     def __init__(self, model_path: str = EMBED_MODEL_PATH):
         self._model_path = model_path
+        self._langchain_embeddings = None
+
+    def _ensure_imports(self):
+        if self._langchain_embeddings is not None:
+            return
+        import sys as _sys
+        _embed_script_dir = os.path.join(self._model_path, "scripts")
+        if _embed_script_dir not in _sys.path:
+            _sys.path.insert(0, _embed_script_dir)
+        from langchain_core.embeddings import Embeddings
+        self._langchain_embeddings = Embeddings
 
     @property
-    def _embedder(self) -> _Qwen3VLEmbedder:
+    def _embedder(self):
         global _qwen3vl_embedder
         if _qwen3vl_embedder is None:
-            _qwen3vl_embedder = _Qwen3VLEmbedder(
+            self._ensure_imports()
+            from qwen3_vl_embedding import Qwen3VLEmbedder
+            _qwen3vl_embedder = Qwen3VLEmbedder(
                 self._model_path,
                 default_instruction="Represent the user's input.",
             )
@@ -208,12 +182,6 @@ FEWSHOT_EXAMPLES = [
     ),
 ]
 
-GRADE_PROMPT = (
-    "你是一个判定器，评估检索到的上下文是否有助于回答用户问题。\n"
-    "上下文内容：\n{context}\n\n问题：{question}\n"
-    "如果上下文对回答该问题有帮助，返回 'yes'；否则返回 'no'。"
-)
-
 ANSWER_WITH_CONTEXT = (
     "请使用提供的上下文回答用户的问题。\n\n"
     "问题：\n{question}\n\n上下文：\n{context}\n\n"
@@ -232,44 +200,11 @@ ANSWER_NO_CONTEXT = (
 )
 
 
-# ---------------- 模型/向量函数 ----------------
+# ---------------- 模型函数 ----------------
 def _get_llm():
+    from langchain.chat_models import init_chat_model
     return init_chat_model(model=MODEL_NAME, model_provider=MODEL_PROVIDER, temperature=TEMPERATURE)
 
-def _get_grader():
-    return init_chat_model(model=MODEL_NAME, model_provider=MODEL_PROVIDER, temperature=0)
-
-def _get_embeddings():
-    return Qwen3VLEmbeddings(model_path=EMBED_MODEL_PATH)
-
-def _vs_dir(file_id: str) -> str:
-    return os.path.join("data", file_id, "index_faiss")
-
-def _list_ready_indexes() -> list[str]:
-    """Return list of file_ids that have a built FAISS index."""
-    data_root = os.path.join("data")
-    if not os.path.exists(data_root):
-        return []
-    result = []
-    for entry in os.listdir(data_root):
-        idx_path = os.path.join(data_root, entry, "index_faiss", "index.faiss")
-        if os.path.exists(idx_path):
-            result.append(entry)
-    return result
-
-def _load_vs(file_id: str) -> FAISS:
-    vs_path = _vs_dir(file_id)
-    idx_file = os.path.join(vs_path, "index.faiss")
-    if not os.path.exists(idx_file):
-        raise FileNotFoundError(f"FAISS index not found at {vs_path}; build index first.")
-    return FAISS.load_local(vs_path, _get_embeddings(), allow_dangerous_deserialization=True)
-
-def _score_ok(scores: List[float]) -> bool:
-    if not scores:
-        return False
-    top1 = scores[0]
-    mean3 = sum(scores[:3]) / min(3, len(scores))
-    return (top1 <= SCORE_TAU_TOP1) or (mean3 <= SCORE_TAU_MEAN3)
 
 # ---------------- 简单提问检测（跳过检索） ----------------
 import re
@@ -322,49 +257,6 @@ def is_simple_question(question: str) -> bool:
             return True
     return False
 
-
-# ---------------- 主流程：检索 + 判定 + 生成 ----------------
-async def retrieve(question: str, file_id: str) -> tuple[list[dict], str]:
-    """
-    返回 (citations, context_text)
-    citations: [{citation_id, fileId, rank, page, snippet, score, previewUrl}]
-    context_text: 供 LLM 使用的拼接上下文
-    """
-    vs = _load_vs(file_id)
-    hits = vs.similarity_search_with_score(question, k=K)
-    citations = []
-    ctx_snippets = []
-    scores = []
-    for i, (doc, score) in enumerate(hits, start=1):
-        snippet_short = (doc.page_content or "").strip()
-        if len(snippet_short) > 500:
-            snippet_short = snippet_short[:500] + "..."
-        page = doc.metadata.get("page") or doc.metadata.get("page_number")
-        citations.append({
-            "citation_id": f"{file_id}-c{i}",
-            "fileId": file_id,
-            "rank": i,
-            "page": page,
-            "snippet": (doc.page_content or "")[:4000],
-            "score": float(score),
-            "previewUrl": f"/api/v1/pdf/page?fileId={file_id}&page={(page or 1)}&type=original",
-        })
-        ctx_snippets.append(snippet_short)
-        scores.append(float(score))
-    context_text = "\n\n".join(ctx_snippets) if ctx_snippets else "(no hits)"
-
-    # 规则 + LLM 复核
-    ok_by_score = _score_ok(scores)
-    if not ok_by_score:
-        grader = _get_grader()
-        grade_prompt = GRADE_PROMPT.format(context=context_text, question=question)
-        decision = await grader.ainvoke([{"role": "user", "content": grade_prompt}])
-        ok_by_llm = "yes" in (decision.content or "").lower()
-    else:
-        ok_by_llm = True
-
-    branch = "with_context" if ok_by_llm else "no_context"
-    return citations, context_text if branch == "with_context" else ""
 
 async def answer_stream(
     question: str,
@@ -502,203 +394,230 @@ async def answer_stream(
     yield {"type": "done", "data": {"used_retrieval": branch == "with_context"}}
 
 
-async def retrieve_multi(question: str, file_ids: list[str]) -> tuple[list[dict], str]:
+# ---------------- 附件概要提取（优化检索） ----------------
+
+def extract_attachment_outline(attachment_text: str, filename: str = "") -> str:
+    """从附件文本中提取标题和关键标识，用于增强检索 query。
+
+    不调用 LLM，纯规则提取，速度快。
+    返回：简短概要字符串（≤150 字），可直接拼接进检索 query。
     """
-    Retrieve from multiple knowledge bases, merging results.
-    Returns (citations, context_text)
+    parts = []
+
+    # 1. 文件名（去掉扩展名）
+    if filename:
+        name = filename.rsplit(".", 1)[0]
+        if name:
+            parts.append(name)
+
+    # 2. Markdown 标题（# 开头的行，取前 3 条）
+    lines = attachment_text.strip().split("\n")
+    heading_count = 0
+    for line in lines:
+        line = line.strip()
+        if line.startswith("# ") or line.startswith("## "):
+            heading = line.lstrip("#").strip()
+            if heading and len(heading) > 2:
+                parts.append(heading)
+                heading_count += 1
+                if heading_count >= 2:
+                    break
+
+    # 3. 货号/产品编号（如 HC18PS04、HSCX536、MPPT9601A 等大写字母数字组合）
+    import re as _re
+    codes = _re.findall(r'\b[A-Z]{2,}[0-9]{2,}[A-Z0-9]*\b', attachment_text)
+    seen = set()
+    for code in codes:
+        if code not in seen and code.lower() not in parts:
+            parts.append(code)
+            seen.add(code)
+            if len(parts) >= 6:
+                break
+
+    return " ".join(parts[:5])
+
+
+def build_search_query(user_question: str, attachment_text: str = "", filename: str = "") -> str:
+    """构造检索 query：用户问题 + 附件概要（如有）。
+
+    附件概要帮助向量检索定位到知识库中的具体产品/文档，
+    完整附件内容仍作为上下文传入 LLM。
     """
-    if not file_ids:
-        file_ids = _list_ready_indexes()
+    base = user_question.strip() if user_question else " "
+    if not attachment_text:
+        return base
 
-    all_citations: list[dict] = []
-    all_snippets: list[str] = []
-    best_scores: list[float] = []
+    outline = extract_attachment_outline(attachment_text, filename)
+    if not outline:
+        return base
 
-    for file_id in file_ids:
-        try:
-            vs = _load_vs(file_id)
-            hits = vs.similarity_search_with_score(question, k=K)
-            for i, (doc, score) in enumerate(hits, start=1):
-                snippet_short = (doc.page_content or "").strip()
-                if len(snippet_short) > 500:
-                    snippet_short = snippet_short[:500] + "..."
-                page = doc.metadata.get("page") or doc.metadata.get("page_number")
-                all_citations.append({
-                    "citation_id": f"{file_id}-c{i}",
-                    "fileId": file_id,
-                    "rank": len(all_citations) + 1,
-                    "page": page,
-                    "snippet": (doc.page_content or "")[:4000],
-                    "score": float(score),
-                    "previewUrl": f"/api/v1/pdf/page?fileId={file_id}&page={(page or 1)}&type=original",
-                })
-                all_snippets.append(snippet_short)
-                best_scores.append(float(score))
-        except FileNotFoundError:
-            continue
-
-    if not all_snippets:
-        return [], ""
-
-    context_text = "\n\n".join(all_snippets)
-    ok_by_score = _score_ok(best_scores)
-    ok_by_llm = ok_by_score
-    if not ok_by_score:
-        grader = _get_grader()
-        grade_prompt = GRADE_PROMPT.format(context=context_text, question=question)
-        decision = await grader.ainvoke([{"role": "user", "content": grade_prompt}])
-        ok_by_llm = "yes" in (decision.content or "").lower()
-
-    if ok_by_llm:
-        # Deduplicate citations, keep top K total
-        return all_citations[:K], context_text
-    return [], ""
+    # 限制总长度，避免 query 过长影响 embedding 精度
+    combined = f"{base} [附件: {outline}]"
+    if len(combined) > 500:
+        combined = combined[:500]
+    return combined
 
 
-# ---------------- OCR for user-uploaded files ----------------
+# ---------------- OCR for user-uploaded files (MinerU only) ----------------
 
-_ocr_instance = None
-
-def _get_ocr():
-    """Lazy init PaddleOCR instance"""
-    global _ocr_instance
-    if _ocr_instance is None and HAS_PADDLEOCR:
-        _ocr_instance = PaddleOCR(lang='ch')
-    return _ocr_instance
-
-
-def extract_text_from_image(file_path: str) -> str:
-    """Extract text from image using PaddleOCR
-    
-    PaddleOCR 2.x 返回格式: [[[box, (text, confidence)], ...], ...]  # 每页一个列表
-    """
-    if not HAS_PADDLEOCR or not HAS_PIL:
-        return ""
-    ocr = _get_ocr()
-    if not ocr:
-        return ""
+def _kill_process_tree_windows(pid: int) -> None:
+    """Windows 上强制终止整个进程树"""
+    import subprocess as _sp
     try:
-        result = ocr.ocr(file_path)
-        texts = []
-        if not result:
-            return ""
-        # result 是列表，每个元素对应一页的识别结果
-        for page_result in result:
-            if not page_result:
-                continue
-            for line in page_result:
-                if not line or len(line) < 2:
-                    continue
-                # line 格式: [box_coordinates, (text, confidence)]
-                text_info = line[1]
-                if isinstance(text_info, (list, tuple)) and len(text_info) >= 2:
-                    text = text_info[0]  # 第一个元素是识别文本
-                    confidence = text_info[1] if len(text_info) > 1 else 0
-                    # 可选：过滤低置信度结果
-                    if text and confidence > 0.5:
-                        texts.append(text)
-                elif isinstance(text_info, dict):
-                    text = text_info.get("text", "")
-                    if text:
-                        texts.append(text)
-        return "\n".join(texts)
-    except Exception as e:
-        print(f"OCR image error: {e}")
+        _sp.run(
+            ["taskkill", "/F", "/T", "/PID", str(pid)],
+            capture_output=True,
+            timeout=10,
+        )
+    except Exception:
+        pass
+
+
+def extract_text_from_image_with_mineru(file_path: str) -> str:
+    """使用 MinerU 从图片中提取文本内容（fast CLI 模式）"""
+    import subprocess as _subprocess
+    import tempfile as _tempfile
+    import shutil as _shutil
+    import platform as _platform
+
+    # 检查 mineru 可执行文件是否可用
+    if not _shutil.which("mineru"):
+        print("MinerU 未安装或不在 PATH 中")
         return ""
 
+    # 检查文件是否存在
+    _p = Path(file_path)
+    if not _p.exists():
+        print(f"MinerU: 文件不存在 {file_path}")
+        return ""
+    if not _p.is_file():
+        print(f"MinerU: 路径不是文件 {file_path}")
+        return ""
 
-def extract_text_from_pdf_with_mineru(file_path: str) -> str:
-    """使用 MinerU 从 PDF 提取文本内容"""
+    # 图片 OCR 超时设短一些，避免长时间卡住
+    IMAGE_OCR_TIMEOUT = 240
+
     try:
-        # 创建临时输出目录
-        import tempfile
-        import subprocess
-        with tempfile.TemporaryDirectory() as temp_dir:
+        with _tempfile.TemporaryDirectory() as temp_dir:
             temp_output_path = Path(temp_dir)
-            
-            # 调用 mineru 命令解析 PDF
+
             cmd = [
                 "mineru",
-                "-p", str(file_path),
+                "-p", str(_p.resolve()),
                 "-o", str(temp_output_path),
                 "-b", "pipeline"
             ]
-            
+
+            print(f"执行 MinerU 图片解析: {' '.join(cmd)}")
+            proc = None
+            stdout = ""
+            stderr = ""
             try:
-                result = subprocess.run(
+                # 使用 Popen 替代 subprocess.run，超时后能可靠地杀进程树
+                proc = _subprocess.Popen(
                     cmd,
-                    check=True,
-                    capture_output=True,
+                    stdout=_subprocess.PIPE,
+                    stderr=_subprocess.PIPE,
                     text=True,
                     encoding="utf-8",
-                    errors="replace"
+                    errors="replace",
+                    creationflags=_subprocess.CREATE_NO_WINDOW if _platform.system() == "Windows" else 0,
                 )
-                print(f"MinerU 附件解析成功: {result.stdout}")
-            except subprocess.CalledProcessError as e:
-                print(f"MinerU 附件解析失败: {e.stderr}")
+                try:
+                    stdout, stderr = proc.communicate(timeout=IMAGE_OCR_TIMEOUT)
+                    returncode = proc.returncode
+                except _subprocess.TimeoutExpired:
+                    print(f"MinerU 图片解析超时（>{IMAGE_OCR_TIMEOUT}s），强制终止进程树...")
+                    if _platform.system() == "Windows":
+                        _kill_process_tree_windows(proc.pid)
+                    else:
+                        proc.kill()
+                    try:
+                        proc.wait(timeout=5)
+                    except _subprocess.TimeoutExpired:
+                        print("MinerU 进程未能终止，跳过")
+                    return ""
+
+                if returncode != 0:
+                    stderr_tail = (stderr or "")[-400:]
+                    stdout_tail = (stdout or "")[-200:]
+                    print(f"MinerU 返回非零 exit code={returncode}")
+                    if stderr_tail:
+                        print(f"MinerU stderr (tail): {stderr_tail}")
+                    if stdout_tail:
+                        print(f"MinerU stdout (tail): {stdout_tail}")
+                    return ""
+                print(f"MinerU 图片解析成功 (stdout): {(stdout or '')[:200]}")
+                if stderr:
+                    print(f"MinerU 图片解析 (stderr): {stderr[:200]}")
+            except FileNotFoundError:
+                print("MinerU 未安装或不在 PATH 中")
                 return ""
-            
-            # 查找生成的 markdown 文件
-            md_files = list(temp_output_path.glob("*.md"))
+            finally:
+                # 确保进程被清理
+                if proc is not None and proc.poll() is None:
+                    try:
+                        if _platform.system() == "Windows":
+                            _kill_process_tree_windows(proc.pid)
+                        else:
+                            proc.kill()
+                        proc.wait(timeout=3)
+                    except Exception:
+                        pass
+
+            md_files = list(temp_output_path.rglob("*.md"))
+            print(f"MinerU 图片递归找到的 md 文件: {md_files}")
             if not md_files:
-                print("未找到 MinerU 生成的 Markdown 文件")
+                # 尝试查找所有文件帮助诊断
+                all_files = list(temp_output_path.rglob("*"))
+                print(f"MinerU 输出目录内容 ({len(all_files)} files): {[str(f.relative_to(temp_output_path)) for f in all_files[:20]]}")
                 return ""
-            
-            # 读取 Markdown 内容
+
             md_file = md_files[0]
             md_content = md_file.read_text(encoding="utf-8")
+            if md_content.strip():
+                print(f"MinerU 成功提取 {len(md_content)} 字符")
+            else:
+                print("MinerU 生成的 Markdown 文件为空")
             return md_content
-            
+
     except Exception as e:
-        print(f"MinerU 附件 PDF 提取文本错误: {e}")
+        print(f"MinerU 图片提取文本错误: {e}")
+        import traceback
+        traceback.print_exc()
         return ""
 
-def extract_text_from_pdf_file(file_path: str) -> str:
-    """Extract text from PDF using MinerU"""
-    return extract_text_from_pdf_with_mineru(file_path)
+
+def extract_text_from_image(file_path: str) -> str:
+    """Extract text from image using MinerU"""
+    return extract_text_from_image_with_mineru(file_path)
 
 
 def extract_text_from_file(file_path: str, filename: str) -> str:
-    """Extract text from uploaded file based on extension"""
+    """Extract text from uploaded image using MinerU"""
     ext = Path(filename).suffix.lower()
     image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tiff", ".tif"}
-    
+
     if ext in image_exts:
         return extract_text_from_image(file_path)
-    elif ext == ".pdf":
-        return extract_text_from_pdf_file(file_path)
-    elif ext == ".docx":
-        # DOCX: try to extract text directly first, fallback to OCR if needed
-        try:
-            from docx import Document
-            doc = Document(file_path)
-            text = "\n".join(p.text for p in doc.paragraphs)
-            if text.strip():
-                return text
-            # 如果直接提取为空，尝试OCR（含图片的DOCX）
-            return ""
-        except Exception as e:
-            print(f"DOCX text extraction failed: {e}")
-            return ""
-    elif ext == ".xlsx":
-        # XLSX: extract text from cells
-        try:
-            from openpyxl import load_workbook
-            wb = load_workbook(filename=file_path, read_only=True, data_only=True)
-            ws = wb.active
-            texts = []
-            for row in ws.iter_rows(values_only=True):
-                for cell in row:
-                    if cell is not None and str(cell).strip():
-                        texts.append(str(cell))
-            wb.close()
-            return "\n".join(texts)
-        except Exception as e:
-            print(f"XLSX text extraction failed: {e}")
-            return ""
-    elif ext in {".txt", ".md"}:
-        try:
-            return Path(file_path).read_text(encoding="utf-8")
-        except:
-            return ""
     return ""
+
+
+# ---------------- 启动预加载 ----------------
+
+def preload_models() -> None:
+    """服务启动时预加载 embedding 模型，避免首次请求等待"""
+    import sys as _sys
+
+    print("[preload] 开始预加载模型...")
+
+    # Qwen3-VL-Embedding-2B（首次加载 PyTorch + 2B 模型 ~30-90s）
+    print("[preload] (1/1) 加载 Qwen3-VL-Embedding-2B...")
+    _embed_script_dir = os.path.join(EMBED_MODEL_PATH, "scripts")
+    if _embed_script_dir not in _sys.path:
+        _sys.path.insert(0, _embed_script_dir)
+    embedder = Qwen3VLEmbeddings(EMBED_MODEL_PATH)
+    _ = embedder.embed_query("warmup")  # 触发 PyTorch + 模型加载
+    print("[preload] Qwen3-VL-Embedding-2B 就绪")
+
+    print("[preload] 所有模型预加载完成")

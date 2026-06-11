@@ -312,11 +312,6 @@ def parse_xlsx(file_id: str) -> Dict[str, Any]:
     
     for row in rows[1:]:
         values = [cell.value for cell in row]
-        # 补齐到 headers 长度：openpyxl read_only 模式下行末尾空单元格可能不返回，
-        # 导致某些行的 values 比 headers 短，zip() 截断会丢失末尾几列
-        while len(values) < len(headers):
-            values.append(None)
-        
         if not any(v is not None and str(v).strip() for v in values):
             continue
         
@@ -324,8 +319,6 @@ def parse_xlsx(file_id: str) -> Dict[str, Any]:
         for h, v in zip(headers, values):
             h_str = str(h).strip() if h else ""
             v_str = str(v).strip() if v is not None else ""
-            # 单元格内换行替换为空格，保证一个 Excel 行 = 一个分块
-            v_str = v_str.replace("\n", " ").replace("\r", " ")
             if h_str:
                 parts.append(f"{h_str}：{v_str}")
         

@@ -5,7 +5,7 @@ import { ScrollArea } from "./ui/scroll-area";
 import { Avatar, AvatarFallback } from "./ui/avatar";
 import { Send, User, Bot, Sparkles, Paperclip, X, Loader2 } from "lucide-react";
 import { MarkdownRenderer } from "./MarkdownRenderer";
-import { processChatStream, clearSession, uploadPdf, startParse, waitForParseReady, buildIndex } from "../services/api";
+import { processChatStream, clearSession, uploadChatImage } from "../services/api";
 import { toast } from "sonner";
 
 type Reference = {
@@ -24,12 +24,14 @@ type Message = {
   timestamp: Date;
   references?: Reference[];
   attachments?: string[];
+  imageUrls?: string[];  // 图片附件 URL 列表
 };
 
 type AttachedFile = {
   file: File;
   uploadProgress: number; // 0-100, -1 = uploaded, -2 = error
-  fileId?: string;
+  imageUrl?: string;
+  extractedText?: string;
 };
 
 export function ChatInterface({
@@ -92,53 +94,38 @@ export function ChatInterface({
     // Reset file input so the same file can be selected again
     if (fileInputRef.current) fileInputRef.current.value = '';
 
+    // 仅允许图片格式
+    const ext = file.name.split('.').pop()?.toLowerCase();
+    const imageExts = ['png', 'jpg', 'jpeg', 'bmp', 'webp', 'gif', 'tiff', 'tif'];
+    if (!ext || !imageExts.includes(ext)) {
+      toast.error(`暂不支持 ${file.name} 格式，聊天附件仅支持图片文件（PNG/JPG/BMP/WEBP等），PDF/DOCX 等格式暂未开通`);
+      return;
+    }
+
     const newFile: AttachedFile = { file, uploadProgress: 0 };
     setAttachedFiles(prev => [...prev, newFile]);
 
-    // Start upload in background
-    let progressInterval: NodeJS.Timeout | undefined;
     try {
-      progressInterval = setInterval(() => {
-        setAttachedFiles(prev => prev.map(f =>
-          f === newFile && f.uploadProgress < 90
-            ? { ...f, uploadProgress: f.uploadProgress + 15 }
-            : f
-        ));
-      }, 200);
-
-      const uploadResponse = await uploadPdf(file);
-      if (progressInterval) clearInterval(progressInterval);
-
-      // Start parsing
-      await startParse(uploadResponse.fileId);
-      
-      // Wait for parsing to complete before building index
-      setAttachedFiles(prev => prev.map(f =>
-        f === newFile
-          ? { ...f, uploadProgress: 50 }
-          : f
-      ));
-      await waitForParseReady(uploadResponse.fileId);
-      
-      // Build index
-      try {
-        await buildIndex(uploadResponse.fileId);
-      } catch {
-        // Index build may fail but continue anyway
-      }
+      const result = await uploadChatImage(file);
 
       setAttachedFiles(prev => prev.map(f =>
         f === newFile
-          ? { ...f, uploadProgress: -1, fileId: uploadResponse.fileId }
+          ? { ...f, uploadProgress: -1, imageUrl: result.imageUrl, extractedText: result.extractedText }
           : f
       ));
-      toast.success(`文件 "${file.name}" 已上传并解析`);
+      const textInfo = result.extractedText ? `，已识别 ${result.extractedText.length} 个字符` : '';
+      toast.success(`图片 "${file.name}" 已上传${textInfo}`);
     } catch (error) {
-      if (progressInterval) clearInterval(progressInterval);
       setAttachedFiles(prev => prev.map(f =>
         f === newFile ? { ...f, uploadProgress: -2 } : f
       ));
-      toast.error(`文件上传失败: ${file.name}`);
+      const errMsg = error instanceof Error ? error.message : '未知错误';
+      // 如果是后端返回的不支持格式消息，直接显示
+      if (errMsg.includes('UNSUPPORTED') || errMsg.includes('仅支持图片')) {
+        toast.error(`暂不支持此文件格式，聊天附件仅支持图片文件`);
+      } else {
+        toast.error(`图片上传失败: ${file.name}`);
+      }
     }
   };
 
@@ -152,23 +139,28 @@ export function ChatInterface({
     // 若有进行中的流，先中断
     abortRef.current?.abort();
 
-    // 获取已上传的文件 fileId
-    const uploadedFiles = attachedFiles.filter(f => f.fileId);
-    // 优先使用最新上传的文件
-    const fileIdForQuery = uploadedFiles.length > 0 ? uploadedFiles[uploadedFiles.length - 1].fileId : undefined;
+    // 收集已上传图片的信息
+    const uploadedFiles = attachedFiles.filter(f => f.uploadProgress === -1);
+    const imageUrls = uploadedFiles.map(f => f.imageUrl).filter(Boolean) as string[];
+    // 拼接所有图片的 OCR 提取文本
+    const attachmentText = uploadedFiles
+      .map(f => f.extractedText)
+      .filter(Boolean)
+      .join('\n\n');
 
     // 先落地用户消息（显示附件信息）
     const userMessage: Message = {
       id: Date.now().toString(),
       type: "user",
-      content: input.trim() || "请分析附件内容",
+      content: input.trim() || "请分析附件图片内容",
       timestamp: new Date(),
       attachments: attachedFiles.map(f => f.file.name),
+      imageUrls: imageUrls.length > 0 ? imageUrls : undefined,
     };
     setMessages((prev) => [...prev, userMessage]);
 
     // 准备流式状态
-    const userText = input.trim() || `请分析附件内容: ${attachedFiles.map(f => f.file.name).join(', ')}`;
+    const userText = input.trim() || "请分析附件图片内容";
     setInput("");
     setAttachedFiles([]);
     setIsTyping(true);
@@ -255,8 +247,7 @@ export function ChatInterface({
           setMessages((prev) => [...prev, errorMessage]);
           toast.error("获取回复失败");
         },
-        // 传递 fileId
-        fileIdForQuery,
+        attachmentText || undefined,  // attachmentText - 图片 OCR 文本
       );
     } catch (e) {
       console.error("Chat request failed:", e);
@@ -361,6 +352,20 @@ export function ChatInterface({
                       {m.type === "user" ? (
                         <div className="space-y-2">
                           <p className="text-primary-foreground leading-relaxed text-base whitespace-pre-wrap">{m.content}</p>
+                          {/* 显示上传的图片 */}
+                          {m.imageUrls && m.imageUrls.length > 0 && (
+                            <div className="flex flex-wrap gap-2 pt-1">
+                              {m.imageUrls.map((url, i) => (
+                                <a key={i} href={url} target="_blank" rel="noopener noreferrer" className="block">
+                                  <img
+                                    src={url}
+                                    alt={`附件图片 ${i + 1}`}
+                                    className="max-w-[200px] max-h-[200px] rounded-lg object-cover border border-primary/20 hover:border-primary/50 transition-colors"
+                                  />
+                                </a>
+                              ))}
+                            </div>
+                          )}
                           {m.attachments && m.attachments.length > 0 && (
                             <div className="flex flex-wrap gap-2 pt-2 border-t border-primary/20">
                               {m.attachments.map((name, i) => (
@@ -473,7 +478,7 @@ export function ChatInterface({
                   handleSend();
                 }
               }}
-              placeholder="输入您的食品分析问题...（可点击左侧 📎 附加文件）"
+              placeholder="输入您的食品分析问题...（可点击左侧 📎 附加图片）"
               className="flex-1 bg-input/60 border-border/40 focus:border-primary/60 glow-ring text-foreground placeholder:text-muted-foreground/70 rounded-xl px-4 py-3 backdrop-blur-sm resize-none min-h-[52px] max-h-[120px] text-base leading-relaxed flex items-center"
               disabled={isTyping}
               rows={1}
@@ -492,7 +497,7 @@ export function ChatInterface({
         <input
           ref={fileInputRef}
           type="file"
-          accept=".pdf,.docx,.xlsx,.txt,.md,.png,.jpg,.jpeg,.bmp,.webp"
+          accept=".png,.jpg,.jpeg,.bmp,.webp,.gif,.tiff,.tif"
           onChange={handleFileSelect}
           className="hidden"
         />

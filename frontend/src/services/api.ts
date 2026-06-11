@@ -1,27 +1,6 @@
 // API服务层 - 处理所有后端API调用
 const API_BASE_URL = (import.meta as any).env?.VITE_API_BASE_URL || 'http://localhost:8001/api/v1';
 
-export interface PdfUploadResponse {
-  fileId: string;
-  name: string;
-  pages: number;
-}
-
-export interface ParseStatusResponse {
-  status: 'idle' | 'parsing' | 'ready' | 'error';
-  progress: number;
-  errorMsg?: string;
-}
-
-export interface CitationChunk {
-  id: string;
-  fileId: string;
-  page: number;
-  snippet: string;
-  bbox: [number, number, number, number];
-  previewUrl: string;
-}
-
 export interface ChatReference {
   id: number;
   text: string;
@@ -42,61 +21,43 @@ export async function checkHealth(): Promise<{ status: string }> {
   }
 }
 
-// 文件上传
-export async function uploadPdf(file: File, replace = true): Promise<PdfUploadResponse> {
+// 上传聊天图片附件（OCR提取文字 + 返回图片URL）
+export async function uploadChatImage(file: File): Promise<{
+  ok: boolean;
+  fileName: string;
+  fileType: string;
+  extractedText: string;
+  imageId: string;
+  imageName: string;
+  imageUrl: string;
+}> {
   const formData = new FormData();
   formData.append('file', file);
-  formData.append('replace', replace.toString());
 
-  const response = await fetch(`${API_BASE_URL}/pdf/upload`, {
+  const response = await fetch(`${API_BASE_URL}/files/upload`, {
     method: 'POST',
     body: formData,
   });
 
   if (!response.ok) {
-    throw new Error(`Upload failed: ${response.statusText}`);
+    const errData = await response.json().catch(() => ({}));
+    throw new Error((errData as any).message || `Upload failed: ${response.statusText}`);
   }
 
   return response.json();
-}
-
-// 开始文件解析
-export async function startParse(fileId: string): Promise<{ jobId: string }> {
-  const response = await fetch(`${API_BASE_URL}/pdf/parse`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ fileId }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Parse start failed: ${response.statusText}`);
-  }
-
-  return response.json();
-}
-
-// 查询解析状态
-export async function getParseStatus(fileId: string): Promise<ParseStatusResponse> {
-  const response = await fetch(`${API_BASE_URL}/pdf/status?fileId=${encodeURIComponent(fileId)}`);
-  
-  if (!response.ok) {
-    throw new Error(`Status check failed: ${response.statusText}`);
-  }
-
-  return response.json();
-}
-
-// 获取PDF页面图片
-export function getPdfPageUrl(fileId: string, page: number, type: 'original' | 'parsed'): string {
-  return `${API_BASE_URL}/pdf/page?fileId=${encodeURIComponent(fileId)}&page=${page}&type=${type}`;
 }
 
 // 获取Citation详情
-export async function getCitationChunk(citationId: string): Promise<CitationChunk> {
+export async function getCitationChunk(citationId: string): Promise<{
+  id: string;
+  fileId: string;
+  page: number;
+  snippet: string;
+  bbox: [number, number, number, number];
+  previewUrl: string;
+}> {
   const response = await fetch(`${API_BASE_URL}/pdf/chunk?citationId=${encodeURIComponent(citationId)}`);
-  
+
   if (!response.ok) {
     throw new Error(`Citation fetch failed: ${response.statusText}`);
   }
@@ -104,74 +65,22 @@ export async function getCitationChunk(citationId: string): Promise<CitationChun
   return response.json();
 }
 
-// Wait for parse to complete with polling
-export async function waitForParseReady(fileId: string, maxRetries = 60, intervalMs = 2000): Promise<void> {
-  for (let i = 0; i < maxRetries; i++) {
-    const status = await getParseStatus(fileId);
-    if (status.status === 'ready') return;
-    if (status.status === 'error') throw new Error('解析失败');
-    await new Promise(r => setTimeout(r, intervalMs));
-  }
-  throw new Error('解析超时');
-}
-
-// 构建向量索引
-export async function buildIndex(fileId: string): Promise<{ ok: boolean; chunks: number }> {
-  const response = await fetch(`${API_BASE_URL}/index/build`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ fileId }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Index build failed: ${response.statusText}`);
-  }
-
-  return response.json();
-}
-
-// 搜索索引
-export async function searchIndex(fileId: string, query: string, k = 5): Promise<{
-  ok: boolean;
-  results: Array<{
-    text: string;
-    score: number;
-    metadata: Record<string, any>;
-  }>;
-}> {
-  const response = await fetch(`${API_BASE_URL}/index/search`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ fileId, query, k }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Search failed: ${response.statusText}`);
-  }
-
-  return response.json();
-}
-
-// 自定义SSE处理函数
+// SSE流式对话
 export async function processChatStream(
   message: string,
   onToken: (text: string) => void,
-  onCitation: (citation: { 
-    citation_id: string; 
-    fileId: string; 
-    rank: number; 
-    page: number; 
+  onCitation: (citation: {
+    citation_id: string;
+    fileId: string;
+    rank: number;
+    page: number;
     previewUrl: string;
     snippet?: string;
   }) => void,
   onDone: (data: { used_retrieval: boolean }) => void,
   onError: (error: string) => void,
-  pdfFileId?: string,
-  sessionId = 'default'
+  attachmentText?: string,
+  sessionId = 'default',
 ) {
   try {
     const response = await fetch(`${API_BASE_URL}/chat`, {
@@ -183,7 +92,7 @@ export async function processChatStream(
       body: JSON.stringify({
         message,
         sessionId,
-        ...(pdfFileId && { pdfFileId }),
+        ...(attachmentText && { attachmentText }),
       }),
     });
 
@@ -204,10 +113,9 @@ export async function processChatStream(
       if (done) break;
 
       buffer += decoder.decode(value, { stream: true });
-      
-      // 处理SSE事件
+
       const events = buffer.split('\n\n');
-      buffer = events.pop() || ''; // 保留最后一个不完整的事件
+      buffer = events.pop() || '';
 
       for (const event of events) {
         if (!event.trim()) continue;
@@ -227,7 +135,7 @@ export async function processChatStream(
         if (eventType && eventData) {
           try {
             const data = JSON.parse(eventData);
-            
+
             switch (eventType) {
               case 'citation':
                 onCitation(data);
@@ -249,18 +157,16 @@ export async function processChatStream(
       }
     }
   } catch (error) {
-    // 如果API不可用，提供一个模拟响应
     if (error instanceof TypeError && error.message.includes('Failed to fetch')) {
       const mockResponse = `I understand you're asking about: "${message}".
 
-Since the backend API is not currently available, I'm showing you a demonstration of the interface. 
+Since the backend API is not currently available, I'm showing you a demonstration of the interface.
 
 ## Key Features Demonstrated:
 - **Markdown rendering**: This response shows how text formatting works
 - **Code blocks**: Here's an example:
 
 \`\`\`javascript
-// Example code with syntax highlighting
 function processDocument(content) {
   return content.split('\\n').map(line => ({
     text: line,
@@ -274,10 +180,9 @@ function processDocument(content) {
 
 To see the full functionality, please start the backend server at \`localhost:8001\`.`;
 
-      // 模拟流式响应
       const words = mockResponse.split(' ');
       let currentIndex = 0;
-      
+
       const streamInterval = setInterval(() => {
         if (currentIndex < words.length) {
           onToken(words[currentIndex] + ' ');
@@ -287,10 +192,10 @@ To see the full functionality, please start the backend server at \`localhost:80
           onDone({ used_retrieval: false });
         }
       }, 50);
-      
+
       return;
     }
-    
+
     onError(error instanceof Error ? error.message : 'Unknown error');
   }
 }
